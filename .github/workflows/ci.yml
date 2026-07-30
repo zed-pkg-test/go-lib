@@ -1,0 +1,92 @@
+name: package CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate workflow
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        with:
+          args: .github/workflows/ci.yml
+
+      - name: Verify Zed and Go module metadata agree
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          import tomllib
+          from pathlib import Path
+
+          with Path(".zpkg.toml").open("rb") as handle:
+              zed = tomllib.load(handle)["package"]
+
+          go_mod = Path("go.mod").read_text()
+          module = re.search(r"^module\s+(\S+)$", go_mod, re.MULTILINE)
+          assert module, "go.mod declares no module path"
+
+          # The module path is the import path a consumer writes, so it must
+          # track the repository the package is published from -- a mismatch
+          # yields a package that installs and then fails to import.
+          assert zed["org"] == "zed-pkg-test", zed["org"]
+          assert zed["repository"]["url"] == "https://github.com/zed-pkg-test/go-lib"
+          assert module.group(1) == "github.com/zed-pkg-test/go-lib", module.group(1)
+          assert zed["license"] == "MIT", zed["license"]
+          PY
+
+      - uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # v5
+        with:
+          go-version: "1.22"
+          cache: false
+
+      - name: Vet, test, and build
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l .)" || { gofmt -l .; echo "gofmt found unformatted files" >&2; exit 1; }
+          go vet ./...
+          go test ./... -count=1
+          go build ./...
+
+      - name: Audit published module contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `zed publish` ships the tracked source tree, so local build and Zed
+          # state must not be tracked in the first place.
+          git ls-files > "$RUNNER_TEMP/tracked.txt"
+          cat "$RUNNER_TEMP/tracked.txt"
+          for required in go.mod greet.go README.md; do
+            grep -Fxq "$required" "$RUNNER_TEMP/tracked.txt" \
+              || { echo "required package file missing: $required" >&2; exit 1; }
+          done
+          if grep -Eq '(^|/)(\.zed|vendor)/' "$RUNNER_TEMP/tracked.txt"; then
+            echo "local or vendored state leaked into the package" >&2
+            exit 1
+          fi
+
+      - name: Upload package-content diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: go-package-files
+          path: ${{ runner.temp }}/tracked.txt
+          if-no-files-found: warn
+          retention-days: 7

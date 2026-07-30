@@ -1,0 +1,10 @@
+[package]
+org = "zed-pkg-test"
+name = "go-lib"
+version = "1.0.0"
+description = "A tiny Go module sourced via zed (complements the module proxy)."
+license = "MIT"
+
+[package.repository]
+vcs = "git"
+url = "https://github.com/zed-pkg-test/go-lib"
